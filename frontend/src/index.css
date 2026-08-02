@@ -1,0 +1,15 @@
+html {
+  background: #101311;
+  color-scheme: dark;
+  overscroll-behavior-y: contain;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
