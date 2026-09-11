@@ -18,35 +18,48 @@ them.
 
 This MVP implements the first useful slice of that idea:
 
-- Generate up to four clarification questions for an ambiguous request.
+- Generate up to three relevant clarification questions for an ambiguous request.
 - Associate one selected answer with its exact question.
 - Optionally remember those selections in the browser.
 - Reuse remembered choices when generating later questions and answers.
 - Inspect, remove, or clear remembered choices at any time.
 - Keep every model credential on the backend.
+- Create, rename, switch, and delete browser-local chats.
+- Request a second opinion with “Challenge this answer”: two independent answers,
+  anonymous peer critiques, and a concise chair synthesis. Incomplete reviews are labeled.
 
 ## Request flow
 
 ```mermaid
 flowchart LR
-    U[User request] --> C[Clarification generator]
-    M[Explicit browser memory] --> C
-    C --> S[User selections]
-    S --> P[Context-enriched prompt]
-    M --> P
-    P --> G[Gemini answer]
-    S -->|Remember enabled| M
+    U[User request and recent chat] --> C[Cheap model checks context]
+    M[Opt-in browser memory] --> C
+    C --> S[Relevant follow-ups if needed]
+    S --> A[Concise answer]
+    A -->|Challenge this answer| I[Two independent answers]
+    I --> R[Anonymous peer critiques]
+    R --> F[Chair synthesis]
 ```
 
-The React client talks only to FastAPI. FastAPI uses Groq for clarification when
-`GROQ_API_KEY` is configured; otherwise it uses Gemini. Gemini produces the final
-answer. The previous prototype's browser-visible Groq credential has been removed.
+The React client talks only to FastAPI. The backend defaults to OpenRouter Gemini
+Pro as an answer fallback and Claude Sonnet 4.6 for answers and a single batch of context questions, with Groq as a fallback when configured.
+Each model call has a timeout and output limit. The review uses two models through
+OpenRouter and runs only when requested. Its five calls (plus at most one retry per truncated call) can take longer and cost
+more than a single answer. The UI shows provider-reported costs when available;
+answer cost excludes the earlier context-selection call.
+
+Selections stay in the chat; saving them as reusable memory is opt-in. Recent chat
+history and selected context accompany follow-up requests. The independent review
+answers do not see the initial answer; critiques and synthesis do. Failed stages
+produce an incomplete review rather than an invented consensus.
 
 ## Current boundaries
 
 This is not yet the full-memory assistant envisioned by the project:
 
-- Memory is explicit browser-local storage, not a server-side user profile.
+- Chats and memory are browser-local storage, not a server-side user profile.
+- There is no live web search or source verification. Model agreement is not proof
+  of correctness, particularly for medical or other consequential questions.
 - There is no authentication, cross-device synchronization, or encrypted store.
 - There is no semantic retrieval, memory confidence, expiration, or conflict resolution.
 - Clarification and answer quality do not yet have an evaluation dataset.
@@ -58,11 +71,12 @@ rules for when the assistant should ask instead of assume.
 
 ## Run locally
 
-Requirements: Python 3.11+, Node.js 22+, and at least a Gemini API key.
+Requirements: Python 3.11+, Node.js 22+, and an OpenRouter API key for the default
+answer and council models. Groq is an optional answer fallback.
 
 ```bash
 cp backend/.env.example backend/.env
-# Add GEMINI_API_KEY to backend/.env
+# Add OPENROUTER_API_KEY to backend/.env; optionally add GROQ_API_KEY
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -78,7 +92,8 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. Vite proxies `/api` to the backend on port 8000.
+Use `npm run dev -- --port 5174` if port 5173 is occupied.
+Open the URL printed by Vite (normally `http://localhost:5173`). Vite proxies `/api` to the backend on port 8000.
 
 The containerized setup is:
 
@@ -87,6 +102,11 @@ docker compose up --build
 ```
 
 Then open `http://localhost:3000`.
+
+Configure `CLARIFICATION_MODEL`, `ANSWER_MODEL`, `FALLBACK_MODEL`, `COUNCIL_MODELS`, and `CHAIR_MODEL`
+in `backend/.env` using `provider:model-id` values. Council models must be distinct;
+this prototype uses the first two configured models. Restart the backend after changes.
+Never commit `.env` or API keys.
 
 ## Checks
 
@@ -106,3 +126,15 @@ npm run build
 
 Git history begins with the public WIP release. The earlier date is project
 provenance, not a backdated public commit.
+
+Optional personalization appears beside each completed answer. It requests at most three missing
+relevant details, supports custom answers and opt-in memory, and generates a tailored response.
+The current council uses Sonnet 4.6 and Gemini 2.5 Pro, with Sonnet as chair.
+
+Broad outing requests can first resolve the activity, followed by one final batch of up to
+three missing details. The last option selection advances automatically; custom text is
+completed with Enter. Continue still allows partially answered batches, and Skip remains available.
+
+Council calls reserve a separate Gemini reasoning allowance and retry once with a larger
+output budget on truncation. Persistently truncated stages stop the review as incomplete;
+reported costs include successful retry attempts and their initial responses.

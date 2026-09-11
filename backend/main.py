@@ -1,24 +1,17 @@
-import asyncio
 import json
-import logging
 import os
 import re
 from typing import Any
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
 from pydantic import BaseModel, Field
+import engine
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "groq/compound-mini")
-PROVIDER_TIMEOUT_SECONDS = float(os.getenv("PROVIDER_TIMEOUT_SECONDS", "60"))
 
 
 def _allowed_origins() -> list[str]:
@@ -48,18 +41,30 @@ class ContextItem(BaseModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class HistoryTurn(BaseModel):
+    prompt: str = Field(max_length=10000)
+    answer: str = Field(max_length=12000)
+
+
 class ChatRequest(BaseModel):
+    personalize: bool = False
     message: str = Field(min_length=1, max_length=10_000)
     context: list[ContextItem] = Field(default_factory=list, max_length=30)
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=6)
 
 
 class ChatResponse(BaseModel):
     reply: str
+    metadata: dict = Field(default_factory=dict)
 
 
 class ClarifyRequest(BaseModel):
+    detail_round: bool = False
+    confirmed: list[ContextItem] = Field(default_factory=list, max_length=30)
+    personalize: bool = False
     message: str = Field(min_length=1, max_length=10_000)
     memory: list[ContextItem] = Field(default_factory=list, max_length=30)
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=6)
 
 
 class ClarificationQuestion(BaseModel):
@@ -68,8 +73,13 @@ class ClarificationQuestion(BaseModel):
 
 
 class ClarifyResponse(BaseModel):
+    resolve_intent: bool = False
     questions: list[ClarificationQuestion]
     provider: str
+    challenge_recommended: bool = False
+    reason: str = ""
+    relevant_memory: list[int] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
 
 
 def _format_context(context: list[ContextItem]) -> str:
@@ -88,9 +98,21 @@ Known user context from choices the user explicitly asked to remember:
 Current request:
 {message}
 
-Ask up to four concise clarification questions only where the current request is
-still ambiguous. Do not repeat anything already resolved by the known context.
-Give two to five short, mutually distinct options for each question. Return only
+Ask zero to three concise clarification questions in ONE batch only where the current request is
+still ambiguous. Collect all materially useful missing details together; there will be no second round.
+Prefer one or two questions; use three when three distinct details materially improve the answer.
+For "I want to go out", first ask what kind of outing: dine out, outdoor activity,
+movie, or something else. Never infer dining intent from old restaurant preferences.
+Saved preferences are not current plans: do not reuse past dates, party size, occasion,
+or budget as current facts without confirmation. Reuse stable relevant facts only.
+For a vague restaurant request such as "I want to eat out", collect missing city/area, cuisine,
+and budget or dining style together (up to three). Do not invent the user's location; location options
+can include "Use saved city" only when a saved city exists, or "I will type a city" and "No specific city".
+For general scientific mechanism or comparative-evidence questions, answer directly with no questions
+unless there is a real ambiguity that changes the answer. Interpret technical abbreviations in context;
+do not replace an unfamiliar technical term with a superficially similar everyday word.
+Do not ask the user to restate information already explicit or strongly implied in their question. Do not repeat anything already resolved by the known context.
+Ask age, sex, health or relationship details only if needed for this specific question, never as a routine checklist. General evidence questions do not require personal demographics. Restaurant searches need a city. Give two to five short, mutually distinct options for each question. Return only
 valid JSON in this exact shape:
 {{"questions": [{{"question": "...", "options": ["...", "..."]}}]}}
 
@@ -149,7 +171,7 @@ def parse_clarifications(raw: str) -> list[ClarificationQuestion]:
 
     questions: list[ClarificationQuestion] = []
     seen_questions: set[str] = set()
-    for item in raw_questions[:4]:
+    for item in raw_questions[:3]:
         if not isinstance(item, dict):
             continue
         question = str(item.get("question", "")).strip()
@@ -180,53 +202,6 @@ def parse_clarifications(raw: str) -> list[ClarificationQuestion]:
     return questions
 
 
-def _generate_with_gemini(prompt: str) -> str:
-    client = genai.Client()
-    result = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-    text = getattr(result, "text", None)
-    if not text:
-        raise ValueError("Gemini returned an empty response")
-    return text
-
-
-async def _generate_with_groq(prompt: str, api_key: str) -> str:
-    async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT_SECONDS) as client:
-        response = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-
-    try:
-        return payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Groq returned an unexpected response") from exc
-
-
-async def _clarification_text(prompt: str) -> tuple[str, str]:
-    provider = os.getenv("CLARIFICATION_PROVIDER", "auto").strip().lower()
-    groq_key = os.getenv("GROQ_API_KEY")
-
-    if provider not in {"auto", "groq", "gemini"}:
-        raise ValueError("CLARIFICATION_PROVIDER must be auto, groq, or gemini")
-    if provider == "groq" and not groq_key:
-        raise RuntimeError("GROQ_API_KEY is required when using the Groq provider")
-    if provider == "groq" or (provider == "auto" and groq_key):
-        return await _generate_with_groq(prompt, groq_key or ""), "groq"
-
-    text = await asyncio.wait_for(
-        asyncio.to_thread(_generate_with_gemini, prompt),
-        timeout=PROVIDER_TIMEOUT_SECONDS,
-    )
-    return text, "gemini"
-
-
 @app.get("/")
 @app.get("/api/health")
 def health() -> dict[str, str]:
@@ -236,31 +211,49 @@ def health() -> dict[str, str]:
 @app.post("/api/clarify", response_model=ClarifyResponse)
 async def clarify(req: ClarifyRequest) -> ClarifyResponse:
     prompt = build_clarification_prompt(req.message.strip(), req.memory)
+    if req.detail_round:
+        prompt += "\nDETAIL ROUND: The broad intent has now been selected. Ask one final batch of up to three missing details that materially improve this specific activity. For dining collect missing city, cuisine, and budget/dining style. Reuse relevant stable memory. Do not ask the activity again. Return no questions if context is sufficient. There will be no more rounds."
+    else:
+        prompt += "\nIf the request is broad like 'I want to go out', ask ONLY the activity/intent question first and set resolve_intent=true. Otherwise collect useful missing details together and set resolve_intent=false."
+    prompt += "\nAnswers confirmed for THIS request (take precedence over old memory):\n" + _format_context(req.confirmed)
+    if req.personalize:
+        prompt = ("Known user context:\n" + _format_context(req.memory) + "\nTopic the user wants to apply to their own situation:\n" + req.message + '\nReturn JSON: {"questions":[{"question":"...","options":["...","..."]}]}. Each question needs two to five short options. ')
+        prompt += "\nPERSONALIZATION MODE: The user already received a general answer and has clicked Personalize this answer. Their NEW intent is how this topic relates to their own situation, not another explanation of the mechanism. This mode overrides the earlier rule to skip questions for clear general questions. Ask up to three materially relevant missing personal details together, with options. For hair-loss treatment suitability, age range, relevant sex-related physiology (not assumed from gender identity), and hair-loss pattern or Norwood stage may help. Norwood is not applicable to everyone; include Not sure / Not applicable where appropriate. Include Prefer not to say for sensitive details. For hair-loss topics, collect missing age range, relevant sex-related physiology, and hair-loss pattern/stage to frame personal relevance, while explaining that these details do not change the underlying mechanism. Skip details already in supplied memory or history. If nothing material is missing, return no questions."
+    prompt += "\nPrevious conversation: " + json.dumps([h.model_dump() for h in req.history])
+    prompt += "\nIn the JSON add challenge_recommended (boolean), reason (short reason), and relevant_memory (zero-based indexes of only relevant supplied memory items). Recommend challenge for consequential tradeoffs, disputed claims or uncertainty, not routine preferences. Do not assert correctness."
     try:
-        raw, provider = await _clarification_text(prompt)
-        return ClarifyResponse(
-            questions=parse_clarifications(raw),
-            provider=provider,
-        )
-    except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-        raise HTTPException(status_code=504, detail="Clarification request timed out") from exc
-    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        logger.exception("Clarification provider failed")
-        raise HTTPException(status_code=502, detail="The clarification provider failed") from exc
+        result = await engine.clarify(prompt, 1200)
+        payload = _json_object(result['text'])
+        relevant = payload.get('relevant_memory', [])
+        relevant = [i for i in relevant if type(i) is int and 0 <= i < len(req.memory)] if isinstance(relevant, list) else []
+        return ClarifyResponse(resolve_intent=not req.detail_round and not req.personalize and payload.get('resolve_intent') is True, questions=parse_clarifications(result['text']),
+            provider=result['provider'], challenge_recommended=payload.get('challenge_recommended') is True,
+            reason=str(payload.get('reason', ''))[:250], relevant_memory=relevant,
+            metadata={k:v for k,v in result.items() if k != 'text'})
+    except engine.ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    except (ValueError, TypeError):
+        # Malformed routing must not prevent the user getting an answer.
+        return ClarifyResponse(questions=[], provider='unavailable', reason='Clarification was unavailable; you can still ask directly.')
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 @app.post("/chat", response_model=ChatResponse, include_in_schema=False)
 async def chat(req: ChatRequest) -> ChatResponse:
-    prompt = build_answer_prompt(req.message.strip(), req.context)
     try:
-        reply = await asyncio.wait_for(
-            asyncio.to_thread(_generate_with_gemini, prompt),
-            timeout=PROVIDER_TIMEOUT_SECONDS,
-        )
-        return ChatResponse(reply=reply)
-    except asyncio.TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Answer request timed out") from exc
-    except Exception as exc:
-        logger.exception("Answer provider failed")
-        raise HTTPException(status_code=502, detail="The answer provider failed") from exc
+        result = await engine.answer(engine.ANSWER_RULES + ('Tailor the explanation to the supplied personal context, separating general evidence from personal suitability. ' if req.personalize else '') + engine.context_prompt(req))
+        return ChatResponse(reply=result['text'], metadata={k:v for k,v in result.items() if k != 'text'})
+    except engine.ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+
+
+class ChallengeRequest(ChatRequest):
+    original_answer: str = Field(min_length=1, max_length=12000)
+
+
+@app.post('/api/challenge')
+async def review_answer(req: ChallengeRequest):
+    try:
+        return await engine.challenge(req)
+    except engine.ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None

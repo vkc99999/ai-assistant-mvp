@@ -641,3 +641,33 @@ input:focus-visible {
     animation-iteration-count: 1 !important;
   }
 }
+
+.workspace-shell { display: grid; grid-template-columns: 240px minmax(0,1fr); min-height: 100svh; }
+.chat-sidebar { position: sticky; top: 0; height: 100svh; display: flex; flex-direction: column; padding: 24px 14px; border-right: 1px solid #29302c; background: #141816; }
+.sidebar-heading { color: #a8b9ae; font-size: 12px; margin: 0 8px 20px; }
+.new-chat { width: 100%; flex-shrink: 0; }
+.saved-chats { overflow: auto; margin-top: 20px; flex: 1; }
+.chat-row { display: flex; align-items: center; border: 1px solid transparent; border-radius: 7px; margin-bottom: 6px; }
+.chat-row.active { background: #203027; border-color: #3e604b; }
+.chat-select { border: 0; background: transparent; color: #c3d2c8; padding: 12px 8px; text-align: left; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.chat-action { background: transparent; border: 0; color: #9eafa4; padding: 8px 6px; cursor: pointer; }
+.sidebar-note { font-size: 11px; color: #819389; line-height: 1.6; }
+.answer-meta, .provider-note, .review-hint { color: #94a79a; font-size: 12px; margin-top: 10px; display: block; }
+.challenge-area { margin-top: 18px; }
+.challenge-area .tool-button { margin-top: 10px; }
+.review-card { margin-top: 20px; padding: 20px; background: #18251d; border: 1px solid #3d5947; border-radius: 10px; }
+.review-card h3 { margin-top: 0; font-size: 16px; color: #b5e7c7; }
+.review-card small { display: block; color: #9bad9f; margin-top: 14px; }
+.review-card details { margin-top: 18px; }
+.review-card summary { cursor: pointer; color: #b5e7c7; font-size: 13px; }
+.review-detail { border-top: 1px solid #354b3c; padding-top: 18px; margin-top: 18px; }
+.review-detail strong { font-size: 12px; color: #b5e7c7; }
+.custom-answer { width: 100%; margin-top: 12px; padding: 10px 12px; background: #141b17; border: 1px solid #3b4b40; border-radius: 6px; color: #e2ede6; }
+button:disabled { cursor: default; opacity: .5; }
+@media(max-width: 760px) {
+  .workspace-shell { grid-template-columns: minmax(0,1fr); }
+  .chat-sidebar { height: auto; position: relative; padding: 12px; border-right: 0; border-bottom: 1px solid #29302c; }
+  .sidebar-heading, .sidebar-note { display: none; }
+  .saved-chats { display: flex; gap: 8px; margin-top: 10px; max-height: 64px; }
+  .chat-row { min-width: 170px; max-width: 230px; flex-shrink: 0; }
+}
